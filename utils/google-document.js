@@ -9,6 +9,7 @@ const {DEFAULT_OPTIONS} = require("./constants")
 
 const HORIZONTAL_TAB_CHAR = "\x09"
 const GOOGLE_DOCS_INDENT = 18
+let tableBorderColor = ""
 
 class GoogleDocument {
   constructor({document, properties = {}, options = {}, links = {}}) {
@@ -29,18 +30,21 @@ class GoogleDocument {
 
     this.process()
   }
-
   formatText(el, {inlineImages = false, namedStyleType = "NORMAL_TEXT"} = {}) {
     if (el.inlineObjectElement) {
       const image = this.getImage(el)
       if (image) {
         if (inlineImages) {
-          return `![${image.alt}](${image.source} "${image.title}")`
+          return `<img src="${image.source}" alt="${image.alt}" title="${image.title}" width='${image.width}' height='${inlineImages.height}'/>`
         }
-        this.elements.push({
-          type: "img",
-          value: image,
-        })
+        // this.elements.push({
+        //   type: "img",
+        //   value: image,
+        // })
+      }
+
+      if (image.source) {
+        return `<img src="${image.source}" alt="${image.alt}" title="${image.title}" width='${image.width}' height='${image.height}'/>`
       }
     }
 
@@ -66,13 +70,11 @@ class GoogleDocument {
       .replace(/“|”/g, '"') // Replace smart quotes by double quotes
       .replace(/\u000b/g, "<br/>") // Replace soft lines breaks, vertical tabs
     const contentMatch = text.match(/^(\s*)(\S+(?:[ \t\v]*\S+)*)(\s*)$/) // Match "text", "before" and "after"
-
     if (contentMatch) {
       before = contentMatch[1]
       text = contentMatch[2]
       after = contentMatch[3]
     }
-
     const defaultStyle = this.getTextStyle(namedStyleType)
     const textStyle = el.textRun.textStyle
     const style = this.options.keepDefaultStyle
@@ -98,8 +100,8 @@ class GoogleDocument {
 
       return "`" + text + "`"
     }
-
     const styles = []
+    const className = []
 
     text = text.replace(/\*/g, "\\*") // Prevent * to be bold
     text = text.replace(/_/g, "\\_") // Prevent _ to be italic
@@ -128,6 +130,22 @@ class GoogleDocument {
       text = `~~${text}~~`
     }
 
+    if (fontSize) {
+      const em = (fontSize.magnitude / this.bodyFontSize).toFixed(2)
+      if (em === "1.55") {
+        styles.push(
+          `fontSize:'1.25rem', fontWeight: '600',  letterSpacing: '0'`
+        )
+      }
+    }
+
+    if (tableBorderColor) {
+      const red = Math.round(tableBorderColor.red * 255)
+      const green = Math.round(tableBorderColor.green * 255)
+      const blue = Math.round(tableBorderColor.blue * 255)
+      className.push(`borderColor:'rgb(${red}, ${green}, ${blue})'`)
+    }
+
     if (_get(foregroundColor, ["color", "rgbColor"]) && !link) {
       const {rgbColor} = foregroundColor.color
       const red = Math.round((rgbColor.red || 0) * 255)
@@ -145,9 +163,12 @@ class GoogleDocument {
       const blue = Math.round((rgbColor.blue || 0) * 255)
       styles.push(`backgroundColor:rgb(${red}, ${green}, ${blue})`)
     }
-
     if (styles.length > 0) {
-      text = `<span style={{${styles.join(",")}}}>${text}</span>`
+      if (styles[0].startsWith("fontSize")) {
+        text = `<span  className='text-xl font-semibold text-primary-table tracking-tighter' style={{}}>${text}</span><br/>`
+      } else {
+        text = `<span style={{${styles.join(",")}}}>${text}</span>`
+      }
     }
 
     if (link) {
@@ -177,11 +198,21 @@ class GoogleDocument {
 
     const inlineObject = inlineObjects[el.inlineObjectElement.inlineObjectId]
     const embeddedObject = inlineObject.inlineObjectProperties.embeddedObject
+    const pointsToPixelsConversionFactor = 1.333
 
     return {
-      source: embeddedObject.imageProperties,
+      source:
+        embeddedObject.imageProperties === undefined
+          ? embeddedObject.imageProperties
+          : embeddedObject.imageProperties.contentUri,
       title: embeddedObject.title || "",
       alt: embeddedObject.description || "",
+      height:
+        embeddedObject.size.height.magnitude * pointsToPixelsConversionFactor ||
+        "",
+      width:
+        embeddedObject.size.width.magnitude * pointsToPixelsConversionFactor ||
+        "",
     }
   }
 
@@ -213,14 +244,13 @@ class GoogleDocument {
   }
 
   getTableCellContent(content) {
-    return content
-      .map((contentElement) => {
-        const hasParagraph = contentElement.paragraph
+    return content.map((contentElement) => {
+      const hasParagraph = contentElement.paragraph
 
-        if (!hasParagraph) return ""
-        return contentElement.paragraph.elements.map(this.formatText).join("")
-      })
-      .join("")
+      if (!hasParagraph) return ""
+      return contentElement.paragraph.elements.map(this.formatText).join("")
+    })
+    // .join("")
   }
 
   indentText(text, level) {
@@ -233,7 +263,6 @@ class GoogleDocument {
 
   appendToList({list, listItem, elementLevel, level}) {
     const lastItem = list[list.length - 1]
-
     if (listItem.level > level) {
       if (typeof lastItem === "object") {
         this.appendToList({
@@ -399,12 +428,10 @@ class GoogleDocument {
 
   processQuote(table) {
     if (this.options.skipQuotes) return
-
     const firstRow = table.tableRows[0]
     const firstCell = firstRow.tableCells[0]
     const quote = this.getTableCellContent(firstCell.content)
     const blockquote = quote.replace(/“|”/g, "") // Delete smart-quotes
-
     this.elements.push({type: "blockquote", value: blockquote})
   }
 
@@ -424,7 +451,6 @@ class GoogleDocument {
 
     // "".split() -> [""]
     if (codeContent.length === 1 && codeContent[0] === "") return
-
     let lang = null
     const langMatch = codeContent[0].match(/^\s*lang:\s*(.*)$/)
 
@@ -433,6 +459,14 @@ class GoogleDocument {
       lang = langMatch[1]
     }
 
+    if (langMatch === null) {
+      if (codeContent[0] === "import turtle") {
+        lang = "pythonTurtle,non-editable,no-visualization"
+      } else {
+        lang = "python,non-editable,no-visualization"
+      }
+      console.log(codeContent[0], "codeContent")
+    }
     this.elements.push({
       type: "code",
       value: {
@@ -446,7 +480,6 @@ class GoogleDocument {
     if (this.options.skipTables) return
 
     const [thead, ...tbody] = table.tableRows
-
     this.elements.push({
       type: "table",
       value: {
@@ -525,14 +558,12 @@ class GoogleDocument {
     )
 
     this.processCover()
-
     this.document.body.content.forEach(
       ({paragraph, table, sectionBreak, tableOfContents}, i) => {
         // Unsupported elements
         if (sectionBreak || tableOfContents) {
           return
         }
-
         if (table) {
           // Quotes
           if (isQuote(table)) {
